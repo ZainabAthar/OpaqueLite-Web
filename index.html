@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OPAQUE Demo</title>
+    <style>
+      body { font-family: monospace; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+      input, button { display: block; margin: 10px 0; padding: 8px; width: 100%; box-sizing: border-box; }
+      .box { border: 1px solid #333; padding: 20px; margin-bottom: 20px; }
+    </style>
+  </head>
+  <body>
+    <h1>OPAQUE Protocol</h1>
+    <div class="box">
+      <h3>Register</h3>
+      <input id="reg-user" placeholder="Username (e.g. alice)" />
+      <input id="reg-pass" type="password" placeholder="Password" />
+      <button id="btn-register">Register</button>
+    </div>
+    <div class="box">
+      <h3>Login</h3>
+      <input id="login-user" placeholder="Username" />
+      <input id="login-pass" type="password" placeholder="Password" />
+      <button id="btn-login">Login</button>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
