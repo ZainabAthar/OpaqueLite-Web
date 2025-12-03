@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+database.json
+server_keys.bin
 
 # Editor directories and files
 .vscode/*
