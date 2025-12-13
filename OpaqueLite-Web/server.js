@@ -3,7 +3,8 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import { createRequire } from 'module';
 import fs from 'fs';
-import { authenticator } from 'otplib'; // ADDED: TOTP Library
+import { authenticator } from 'otplib';
+import rateLimit from 'express-rate-limit';
 
 const require = createRequire(import.meta.url);
 const pkg = require('@47ng/opaque-server');
@@ -53,6 +54,12 @@ function triggerAlarm(type, message) {
 
 app.get('/system-status', (req, res) => {
     res.json(latestThreat || { type: 'SAFE', message: 'System Normal' });
+});
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 5, 
+    message: { error: "Too many login attempts. Try again later." }
 });
 
 // --- CORE ROUTES ---
@@ -105,7 +112,7 @@ app.post('/register-finish', async (req, res) => {
 });
 
 // 3. LOGIN INIT
-app.post('/login-init', async (req, res) => {
+app.post('/login-init', loginLimiter, async (req, res) => {
     try {
         const { userId, startUploadArray } = req.body;
         triggerAlarm('WARNING', `Login Attempt: ${userId}`);
