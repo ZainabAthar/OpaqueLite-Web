@@ -1,6 +1,6 @@
 import init, { Registration, Login } from '@47ng/opaque-client';
-import { argon2id } from 'hash-wasm'; // ADDED
-import QRCode from 'qrcode';          // ADDED
+import { argon2id } from 'hash-wasm';
+import QRCode from 'qrcode';
 
 // --- HELPERS ---
 const binToJson = (u8) => Array.from(u8);
@@ -23,17 +23,54 @@ function log(msg, type = 'info') {
     }
 }
 
-// --- ARGON2 HELPER (ADDED) ---
-async function deriveSlowPassword(password, salt) {
-    log("⏳ Running Argon2id Hardening...", "warn");
-    const hashedPassword = await argon2id({
-        password: password,
-        salt: salt, 
-        parallelism: 1, iterations: 2, memorySize: 512, hashLength: 32,
-        outputType: 'encoded'
+// --- CUSTOM MODAL LOGIC (Promise Wrapper) ---
+function requestMFA() {
+    return new Promise((resolve, reject) => {
+        const modal = document.getElementById('mfa-modal');
+        const input = document.getElementById('mfa-code-input');
+        const btnVerify = document.getElementById('btn-verify-mfa');
+        const btnCancel = document.getElementById('btn-cancel-mfa');
+
+        // Show Modal
+        modal.classList.add('active');
+        input.value = "";
+        input.focus();
+
+        // Handlers
+        const onVerify = () => {
+            const code = input.value;
+            if (code.length < 6) {
+                input.style.borderColor = "var(--error)";
+                return;
+            }
+            cleanup();
+            resolve(code);
+        };
+
+        const onCancel = () => {
+            cleanup();
+            reject("User cancelled MFA");
+        };
+
+        // Key press handler (Enter key support)
+        const onKey = (e) => {
+            if(e.key === "Enter") onVerify();
+            if(e.key === "Escape") onCancel();
+        };
+
+        const cleanup = () => {
+            modal.classList.remove('active');
+            input.style.borderColor = "";
+            btnVerify.removeEventListener('click', onVerify);
+            btnCancel.removeEventListener('click', onCancel);
+            input.removeEventListener('keyup', onKey);
+        };
+
+        // Attach listeners
+        btnVerify.addEventListener('click', onVerify);
+        btnCancel.addEventListener('click', onCancel);
+        input.addEventListener('keyup', onKey);
     });
-    log(`✅ Password Hardened.`, "success");
-    return hashedPassword;
 }
 
 // --- THREAT POLLING ---
@@ -41,7 +78,6 @@ async function checkSystemStatus() {
     try {
         const res = await fetch('http://localhost:3000/system-status');
         const status = await res.json();
-        
         const statusBar = document.getElementById('status-bar');
         const body = document.body;
 
@@ -57,13 +93,23 @@ async function checkSystemStatus() {
             statusBar.innerText = `🚨 CRITICAL BREACH: ${status.message}`;
             statusBar.style.background = "var(--error)";
             body.className = "attack-critical";
-            if(document.body.className !== "attack-critical") {
-                 log(`SECURITY ALERT: ${status.message}`, 'critical');
-            }
         }
     } catch (e) { }
 }
 setInterval(checkSystemStatus, 500);
+
+// --- ARGON2 HELPER ---
+async function deriveSlowPassword(password, salt) {
+    log("⏳ Hardening Password (Argon2id)...", "warn");
+    const hashedPassword = await argon2id({
+        password: password,
+        salt: salt, 
+        parallelism: 1, iterations: 2, memorySize: 512, hashLength: 32,
+        outputType: 'encoded'
+    });
+    log(`✅ Password Hardened.`, "success");
+    return hashedPassword;
+}
 
 // --- WASM SETUP ---
 let isWasmLoaded = false;
@@ -150,11 +196,11 @@ document.querySelector('#btn-login').addEventListener('click', async () => {
     try {
         await loadWasm();
 
-        // 1. Argon2id (Hardening)
+        // 1. Argon2id
         const hardPass = await deriveSlowPassword(pass, user);
 
         const login = new Login();
-        const request = login.start(hardPass); // Use Hardened Password
+        const request = login.start(hardPass);
 
         log(`Attempting login for ${user}...`, 'info');
 
@@ -186,25 +232,29 @@ document.querySelector('#btn-login').addEventListener('click', async () => {
 
         const result = await res2.json();
         
-        // 5. MFA CHECK
+        // 5. MFA CHECK (Using Custom Modal)
         if(result.step === '2FA_REQUIRED') {
-            log("🔒 OPAQUE Verified. Enter 2FA Code...", "warn");
+            log("🔒 OPAQUE Verified. Waiting for 2FA...", "warn");
             
-            const token = prompt("Enter 6-digit Google Authenticator Code:");
-            if(!token) return log("Login Cancelled", "error");
+            try {
+                // Wait for user to type code in the modal
+                const token = await requestMFA();
 
-            const res3 = await fetch('http://localhost:3000/verify-2fa', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ userId: user, token: token })
-            });
-            const final = await res3.json();
+                const res3 = await fetch('http://localhost:3000/verify-2fa', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ userId: user, token: token })
+                });
+                const final = await res3.json();
 
-            if(final.success) {
-                log("✅✅ FULL LOGIN SUCCESS!", "success");
-                log(`🔑 Session Key: ${toHex(jsonToBin(result.tempSessionKey)).substring(0,20)}...`, "success");
-            } else {
-                log("❌ 2FA Failed. Access Denied.", "error");
+                if(final.success) {
+                    log("✅✅ FULL LOGIN SUCCESS!", "success");
+                    log(`🔑 Session Key: ${toHex(jsonToBin(result.tempSessionKey)).substring(0,20)}...`, "success");
+                } else {
+                    log("❌ 2FA Failed. Access Denied.", "error");
+                }
+            } catch (err) {
+                log(err, "error"); // User cancelled
             }
         } else {
             log("Login Failed: " + result.error, 'error');
