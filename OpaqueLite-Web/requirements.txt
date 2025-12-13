@@ -1,0 +1,7 @@
+chalk 
+figlet
+yargs 
+cli-progress 
+fake-useragent
+cli-table3 
+ora
