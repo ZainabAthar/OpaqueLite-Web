@@ -8,6 +8,15 @@ const jsonToBin = (arr) => new Uint8Array(arr);
 const strToBytes = (str) => new TextEncoder().encode(str);
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
 
+// --- HELPER: Generate a valid salt from username ---
+async function generateSalt(username) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(username);
+    // Hash the username to get a 32-byte consistent salt
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return new Uint8Array(hashBuffer);
+}
+
 // --- UI LOGGING ---
 function log(msg, type = 'info') {
     const consoleDiv = document.getElementById('console-output');
@@ -99,12 +108,19 @@ async function checkSystemStatus() {
 setInterval(checkSystemStatus, 500);
 
 // --- ARGON2 HELPER ---
-async function deriveSlowPassword(password, salt) {
+async function deriveSlowPassword(password, username) {
     log("⏳ Hardening Password (Argon2id)...", "warn");
+    
+    // FIX: Generate a 32-byte salt from the username
+    const salt = await generateSalt(username); 
+
     const hashedPassword = await argon2id({
         password: password,
-        salt: salt, 
-        parallelism: 1, iterations: 2, memorySize: 512, hashLength: 32,
+        salt: salt, // Now using the 32-byte hash
+        parallelism: 1, 
+        iterations: 2, 
+        memorySize: 512, 
+        hashLength: 32,
         outputType: 'encoded'
     });
     log(`✅ Password Hardened.`, "success");
