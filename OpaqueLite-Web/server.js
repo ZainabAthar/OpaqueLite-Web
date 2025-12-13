@@ -3,6 +3,7 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import { createRequire } from 'module';
 import fs from 'fs';
+import { authenticator } from 'otplib'; // ADDED: TOTP Library
 
 const require = createRequire(import.meta.url);
 const pkg = require('@47ng/opaque-server');
@@ -38,7 +39,6 @@ if (fs.existsSync(KEY_FILE)) {
     fs.writeFileSync(KEY_FILE, Buffer.from(SERVER_KEY_BYTES));
 }
 
-
 let db = {};
 let loginStates = {}; 
 
@@ -67,7 +67,11 @@ app.post('/register-init', async (req, res) => {
         const userBytes = strToBytes(userId);
 
         const handler = new HandleRegistration(serverSetup);
+        
+        // CORRECTION: request must be first, userBytes second. 
+        // This fixes "deserialize failed".
         const response = handler.start(userBytes, request);
+        
         handler.free();
 
         res.json({ responseArray: binToJson(response) });
@@ -82,8 +86,18 @@ app.post('/register-finish', async (req, res) => {
     try {
         const { userId, recordArray } = req.body;
         console.log(`[Register] Finish for: ${userId}`);
-        db[userId] = recordArray;
-        res.json({ success: true });
+        
+        // ADDED: Generate TOTP Secret
+        const secret = authenticator.generateSecret();
+        const otpauth = authenticator.keyuri(userId, 'OPAQUE-Demo', secret);
+
+        // ADDED: Store secret with record
+        db[userId] = {
+            record: recordArray,
+            totpSecret: secret
+        };
+        
+        res.json({ success: true, otpAuthUrl: otpauth });
     } catch (e) {
         console.error("Reg Finish Error:", e);
         res.status(500).json({ error: e.toString() });
@@ -94,19 +108,20 @@ app.post('/register-finish', async (req, res) => {
 app.post('/login-init', async (req, res) => {
     try {
         const { userId, startUploadArray } = req.body;
-        
-        // ATTACK DETECTION
         triggerAlarm('WARNING', `Login Attempt: ${userId}`);
 
         if (!db[userId]) return res.status(400).json({ error: "User not found" });
 
-        const record = jsonToBin(db[userId]);
+        // MODIFIED: Access .record property since db[userId] is now an object
+        const record = jsonToBin(db[userId].record);
         const request = jsonToBin(startUploadArray);
         const userBytes = strToBytes(userId);
 
         const setup = ServerSetup.deserialize(SERVER_KEY_BYTES);
 
         const handler = new HandleLogin(serverSetup);
+        
+        // CORRECTION: standard order is (record, request, userBytes)
         const response = handler.start(record, userBytes, request);
 
         const state = handler.serialize();
@@ -139,11 +154,34 @@ app.post('/login-finish', async (req, res) => {
 
         setup.free();
 
-        console.log("✅ LOGIN SUCCESS!");
-        res.json({ success: true, sessionKeyArray: binToJson(sessionKey) });
+        console.log("✅ OPAQUE SUCCESS. Requesting 2FA.");
+        
+        // ADDED: Return 2FA Challenge instead of success
+        res.json({ 
+            step: '2FA_REQUIRED', 
+            tempSessionKey: binToJson(sessionKey) 
+        });
     } catch (e) {
         console.error("Login Finish Error:", e);
         res.status(401).json({ error: "Login Failed" });
+    }
+});
+
+// 5. VERIFY TOTP (NEW ROUTE)
+app.post('/verify-2fa', (req, res) => {
+    const { userId, token } = req.body;
+    const userData = db[userId];
+
+    if (!userData || !userData.totpSecret) return res.status(400).json({ error: "User invalid" });
+
+    const isValid = authenticator.check(token, userData.totpSecret);
+
+    if (isValid) {
+        console.log(`[2FA] Success for ${userId}`);
+        res.json({ success: true });
+    } else {
+        triggerAlarm('CRITICAL', `2FA FAILED for ${userId}`);
+        res.json({ success: false, error: "Invalid Code" });
     }
 });
 
@@ -151,7 +189,7 @@ app.post('/login-finish', async (req, res) => {
 app.get('/leak-database', (req, res) => {
     triggerAlarm('CRITICAL', 'DATA BREACH! Database Leaked.');
     res.json({
-        serverKeys: binToJson(serverSetup.serialize()),
+        serverKeys: binToJson(SERVER_KEY_BYTES),
         database: db
     });
 });

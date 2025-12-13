@@ -1,4 +1,6 @@
 import init, { Registration, Login } from '@47ng/opaque-client';
+import { argon2id } from 'hash-wasm'; // ADDED
+import QRCode from 'qrcode';          // ADDED
 
 // --- HELPERS ---
 const binToJson = (u8) => Array.from(u8);
@@ -6,7 +8,7 @@ const jsonToBin = (arr) => new Uint8Array(arr);
 const strToBytes = (str) => new TextEncoder().encode(str);
 const toHex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
 
-// --- UI LOGGING (Connects to her HTML) ---
+// --- UI LOGGING ---
 function log(msg, type = 'info') {
     const consoleDiv = document.getElementById('console-output');
     if(consoleDiv) {
@@ -19,6 +21,19 @@ function log(msg, type = 'info') {
     } else {
         console.log(`[${type}] ${msg}`);
     }
+}
+
+// --- ARGON2 HELPER (ADDED) ---
+async function deriveSlowPassword(password, salt) {
+    log("⏳ Running Argon2id Hardening...", "warn");
+    const hashedPassword = await argon2id({
+        password: password,
+        salt: salt, 
+        parallelism: 1, iterations: 2, memorySize: 512, hashLength: 32,
+        outputType: 'encoded'
+    });
+    log(`✅ Password Hardened.`, "success");
+    return hashedPassword;
 }
 
 // --- THREAT POLLING ---
@@ -42,12 +57,11 @@ async function checkSystemStatus() {
             statusBar.innerText = `🚨 CRITICAL BREACH: ${status.message}`;
             statusBar.style.background = "var(--error)";
             body.className = "attack-critical";
-            // Only log critical alerts to console to avoid spam
             if(document.body.className !== "attack-critical") {
                  log(`SECURITY ALERT: ${status.message}`, 'critical');
             }
         }
-    } catch (e) { /* Ignore polling errors */ }
+    } catch (e) { }
 }
 setInterval(checkSystemStatus, 500);
 
@@ -71,12 +85,16 @@ document.querySelector('#btn-register').addEventListener('click', async () => {
 
     try {
         await loadWasm();
+        
+        // 1. Argon2id (Hardening)
+        const hardPass = await deriveSlowPassword(pass, user);
+
         const reg = new Registration();
+        const request = reg.start(hardPass); // Use Hardened Password
         
         log(`Generating blinded record for ${user}...`, 'info');
-        const request = reg.start(pass); // Start OPAQUE
 
-        // 1. Send Init
+        // 2. Send Init
         const res1 = await fetch('http://localhost:3000/register-init', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -87,11 +105,10 @@ document.querySelector('#btn-register').addEventListener('click', async () => {
 
         const serverResponse = jsonToBin(data1.responseArray);
 
-        // --- THE FIX: Only 2 Arguments (Password + Response) ---
-        // (Do NOT pass userBytes or ServerID here)
-        const record = reg.finish(pass, serverResponse);
+        // 3. Finish
+        const record = reg.finish(hardPass, serverResponse);
 
-        // 2. Upload Record
+        // 4. Upload
         const res2 = await fetch('http://localhost:3000/register-finish', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -99,7 +116,22 @@ document.querySelector('#btn-register').addEventListener('click', async () => {
         });
 
         const data2 = await res2.json();
-        if(data2.success) log(`✅ Registered ${user} successfully.`, 'success');
+        
+        if(data2.success) {
+            log(`✅ Registered ${user} successfully.`, 'success');
+            
+            // 5. Show QR Code
+            log("📲 SCAN QR CODE BELOW FOR 2FA:", "warn");
+            const qrUrl = await QRCode.toDataURL(data2.otpAuthUrl);
+            const consoleDiv = document.getElementById('console-output');
+            const img = document.createElement('img');
+            img.src = qrUrl;
+            img.style.width = "150px";
+            img.style.border = "5px solid white";
+            img.style.marginTop = "10px";
+            consoleDiv.appendChild(img);
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
         
         reg.free();
 
@@ -117,12 +149,16 @@ document.querySelector('#btn-login').addEventListener('click', async () => {
 
     try {
         await loadWasm();
-        const login = new Login();
-        
-        log(`Attempting login for ${user}...`, 'info');
-        const request = login.start(pass); // Start OPAQUE
 
-        // 1. Send Init
+        // 1. Argon2id (Hardening)
+        const hardPass = await deriveSlowPassword(pass, user);
+
+        const login = new Login();
+        const request = login.start(hardPass); // Use Hardened Password
+
+        log(`Attempting login for ${user}...`, 'info');
+
+        // 2. Init
         const res1 = await fetch('http://localhost:3000/login-init', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -133,14 +169,13 @@ document.querySelector('#btn-login').addEventListener('click', async () => {
 
         const serverResponse = jsonToBin(data1.serverResponseArray);
         
-        // --- THE FIX: Only 2 Arguments ---
-        const output = login.finish(pass, serverResponse);
+        // 3. Finish
+        const output = login.finish(hardPass, serverResponse);
         
-        // Handle output format
         const clientFinish = output.message || output; 
         const sessionKey = output.session_key || output.sessionKey || login.getSessionKey();
 
-        // 2. Send Finish
+        // 4. Send
         const res2 = await fetch('http://localhost:3000/login-finish', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -150,11 +185,29 @@ document.querySelector('#btn-login').addEventListener('click', async () => {
         login.free();
 
         const result = await res2.json();
-        if(result.success) {
-            log("✅ Login Success!", 'success');
-            log(`🔑 Session Key: ${toHex(jsonToBin(result.sessionKeyArray)).substring(0,20)}...`, 'success');
+        
+        // 5. MFA CHECK
+        if(result.step === '2FA_REQUIRED') {
+            log("🔒 OPAQUE Verified. Enter 2FA Code...", "warn");
+            
+            const token = prompt("Enter 6-digit Google Authenticator Code:");
+            if(!token) return log("Login Cancelled", "error");
+
+            const res3 = await fetch('http://localhost:3000/verify-2fa', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ userId: user, token: token })
+            });
+            const final = await res3.json();
+
+            if(final.success) {
+                log("✅✅ FULL LOGIN SUCCESS!", "success");
+                log(`🔑 Session Key: ${toHex(jsonToBin(result.tempSessionKey)).substring(0,20)}...`, "success");
+            } else {
+                log("❌ 2FA Failed. Access Denied.", "error");
+            }
         } else {
-            log("Login Failed: Server rejected final message.", 'error');
+            log("Login Failed: " + result.error, 'error');
         }
     } catch (e) {
         log("Login Failed: " + e.message, 'error');
